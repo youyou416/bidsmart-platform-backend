@@ -1,0 +1,13 @@
+# Actual DB-backed test startup requires an explicitly independent database.
+# Offline automated security tests override repositories exclusively in test source code.
+spring:
+  datasource:
+    url: jdbc:mysql://${DB_HOST}:${DB_PORT:2881}/${DB_NAME}?sslMode=VERIFY_IDENTITY&allowMultiQueries=false&allowPublicKeyRetrieval=false&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true&connectTimeout=5000&socketTimeout=10000&characterEncoding=UTF-8
+    username: ${DB_USERNAME:}
+platform:
+  database-host: ${DB_HOST:}
+  database-name: ${DB_NAME:}
+  database-username: ${DB_USERNAME:}
+  database-ssl-mode: VERIFY_IDENTITY
+  bootstrap-enabled: false
+  debug-enabled: false
