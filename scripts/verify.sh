@@ -7,6 +7,7 @@ export JAVA_HOME="$tool_dir/jdk-11"
 export PATH="$JAVA_HOME/bin:$tool_dir/maven-3.6.1/bin:$PATH"
 java -version
 mvn -version
+python3 -m unittest discover -s db/tools -p 'test_*.py'
 maven_args=(-B -ntp -C)
 if [[ -n "${BIDSMART_MAVEN_SETTINGS:-}" ]]; then
   maven_args+=(-s "$BIDSMART_MAVEN_SETTINGS")

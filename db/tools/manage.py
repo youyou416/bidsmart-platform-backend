@@ -15,13 +15,14 @@ import tempfile
 
 BASE = Path(__file__).resolve().parents[1]
 SCHEMA = BASE / "migrations/V001__framework_schema.sql"
+CAPTCHA_SCHEMA = BASE / "migrations/V002__login_captcha.sql"
 SEED = BASE / "migrations/V001__synthetic_seed.sql"
 TARGET = "hr_score_dev"
 
 
-def expected_schema():
+def expected_schema(path=SCHEMA, count=11):
     result = {}
-    for table, body in re.findall(r"CREATE TABLE (\w+) \((.*?)\) DEFAULT", SCHEMA.read_text(), re.S):
+    for table, body in re.findall(r"CREATE TABLE (\w+) \((.*?)\) DEFAULT", path.read_text(), re.S):
         columns = []
         for line in body.splitlines():
             match = re.match(r"\s*(\w+) (BIGINT|VARCHAR|DATETIME|TINYINT|INT)(?:\((\d+)\))?( UNSIGNED)? (.*?)(?:,)?$", line)
@@ -33,8 +34,8 @@ def expected_schema():
         for unique, index, fields in re.findall(r"(UNIQUE )?KEY (\w+) \((.*?)\)", body):
             indexes[index] = ([item.strip() for item in fields.split(",")], bool(unique))
         result[table] = (columns, indexes)
-    if len(result) != 11:
-        raise RuntimeError("Expected exactly eleven versioned framework tables.")
+    if len(result) != count:
+        raise RuntimeError("Unexpected number of versioned tables.")
     return result
 
 
@@ -64,7 +65,7 @@ def inspect(db, schema):
     if not tables:
         return "absent"
     if tables != set(schema):
-        raise RuntimeError("Only part of V001 exists. Automatic repair is forbidden; inspect the interrupted DDL and recover explicitly.")
+        raise RuntimeError("Only part of the selected migration exists. Automatic repair is forbidden; inspect the interrupted DDL and recover explicitly.")
     metadata = db.query("SELECT TABLE_NAME,COLUMN_NAME,DATA_TYPE,COLUMN_TYPE,IS_NULLABLE,COALESCE(CHARACTER_MAXIMUM_LENGTH,''),COALESCE(DATETIME_PRECISION,'') FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN (" + names + ") ORDER BY TABLE_NAME,ORDINAL_POSITION;")
     grouped = {name: [] for name in schema}
     for table, name, kind, column_type, nullable, char_length, datetime_precision in metadata:
@@ -72,17 +73,18 @@ def inspect(db, schema):
         grouped[table].append((name, kind, width, "unsigned" in column_type.lower(), nullable))
     for table, (columns, indexes) in schema.items():
         if grouped[table] != columns:
-            raise RuntimeError("Existing table structure conflicts with V001: " + table + ". Nothing was overwritten.")
+            raise RuntimeError("Existing table structure conflicts with the selected migration: " + table + ". Nothing was overwritten.")
         actual_indexes = {}
         for index, column, non_unique in db.query("SELECT INDEX_NAME,COLUMN_NAME,NON_UNIQUE FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='" + table + "' ORDER BY INDEX_NAME,SEQ_IN_INDEX;"):
             if index not in actual_indexes:
                 actual_indexes[index] = ([], non_unique == "0")
             actual_indexes[index][0].append(column)
         if actual_indexes != indexes:
-            raise RuntimeError("Existing indexes conflict with V001: " + table)
-    auto_increment = db.query("SELECT TABLE_NAME,COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('sys_login_log','sys_operation_log') AND EXTRA LIKE '%auto_increment%' ORDER BY TABLE_NAME;")
-    if auto_increment != [["sys_login_log", "id"], ["sys_operation_log", "id"]]:
-        raise RuntimeError("Required audit-log auto-increment identifiers are missing or conflicting.")
+            raise RuntimeError("Existing indexes conflict with the selected migration: " + table)
+    if "sys_login_log" in schema:
+        auto_increment = db.query("SELECT TABLE_NAME,COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN ('sys_login_log','sys_operation_log') AND EXTRA LIKE '%auto_increment%' ORDER BY TABLE_NAME;")
+        if auto_increment != [["sys_login_log", "id"], ["sys_operation_log", "id"]]:
+            raise RuntimeError("Required audit-log auto-increment identifiers are missing or conflicting.")
     charsets = db.query("SELECT TABLE_NAME,TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME IN (" + names + ");")
     if any(collation.lower() != "utf8mb4_bin" for _, collation in charsets):
         raise RuntimeError("Framework table collation differs from the reviewed utf8mb4_bin baseline.")
@@ -112,6 +114,7 @@ def inspect_seed(db):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["check", "init"], help="check is read-only; init is an explicit write")
+    parser.add_argument("--version", choices=["V001", "V002"], default="V001", help="V002 adds the login captcha table after V001")
     parser.add_argument("--confirm-target", help="init requires literal hr_score_dev")
     parser.add_argument("--confirmed-mysql-tenant", help="init requires the tenant name verified independently in OceanBase administration")
     args = parser.parse_args()
@@ -162,6 +165,21 @@ def main():
             raise RuntimeError("Target database or OceanBase product identity could not be confirmed; no writes were attempted.")
         print("Read-only product/database evidence:", " | ".join(identity[0]))
         print("Tenant name, MySQL compatibility mode, schema ownership and privileges still require the administration checklist.")
+        if args.version == "V002":
+            if inspect(db, schema) != "present":
+                raise RuntimeError("Initialize and verify V001 before applying V002.")
+            captcha_schema = expected_schema(CAPTCHA_SCHEMA, 1)
+            captcha_state = inspect(db, captcha_schema)
+            if captcha_state == "absent":
+                if args.mode == "check":
+                    print("V002 captcha table is absent. No DDL was executed.")
+                    return 2
+                db.execute_file(CAPTCHA_SCHEMA)
+                inspect(db, captcha_schema)
+                print("Created V002 sys_login_captcha. No existing data or account was changed.")
+            else:
+                print("Compatible V002 captcha table already exists; no DDL was executed.")
+            return 0
         state = inspect(db, schema)
         if state == "absent":
             if args.mode == "check":

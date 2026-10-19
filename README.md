@@ -1,6 +1,6 @@
 # 智能化竞价采购平台后端基础工程
 
-本工程只交付文档确认的基础框架：认证会话、首次改密、授权菜单、权限与范围计算、国密工具、审计和配置。采购、报价、竞价、审批、供应商管理等具体业务留待后续实现。
+本工程只交付文档确认的基础框架：认证会话、图形验证码、首次改密、授权菜单、权限与范围计算、国密工具、审计和配置。采购、报价、竞价、审批、供应商管理等具体业务留待后续实现。
 
 后端为独立工程 `bidsmart-platform-backend`，前端为另一独立工程 `bidsmart-platform-frontend`。两者不放在同一工程根目录下，分别构建与运行；数据库资料和后端接口文档放在本工程的 `db/`、`docs/`。当前云端目录分别为 `/workspace/bidsmart-platform-backend` 和 `/workspace/bidsmart-platform-frontend`。
 
@@ -45,7 +45,11 @@ export DB_SSL_MODE=DISABLED
 python3 db/tools/manage.py check
 # 在独立核实租户、模式、库归属及权限后显式初始化：
 python3 db/tools/manage.py init --confirm-target hr_score_dev --confirmed-mysql-tenant sys
+python3 db/tools/manage.py init --version V002 --confirm-target hr_score_dev --confirmed-mysql-tenant sys
+python3 db/tools/manage.py check --version V002
 ```
+
+已有 V001 数据库也必须先执行上面的 V002 初始化和检查（只新增 `sys_login_captcha`），再运行新版后端；不会修改旧账户。详见 [验证码接入与升级](docs/CAPTCHA.md)。
 
 首次账户与 SQL 初始化分开。没有内置账户、密码或管理员通配权限。显式选择初始用户名、输入 12～128 个 Unicode 字符的长口令后，仅首次开启：
 

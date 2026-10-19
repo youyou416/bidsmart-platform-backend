@@ -17,7 +17,7 @@ import org.springframework.web.servlet.HandlerInterceptor;
 @Component
 public final class PermissionInterceptor implements HandlerInterceptor {
     private static final Set<String> FRAMEWORK_ENDPOINTS = new HashSet<>(Arrays.asList(
-            "/api/v1/security/csrf", "/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/auth/me",
+            "/api/v1/security/csrf", "/api/v1/security/captcha", "/api/v1/auth/login", "/api/v1/auth/logout", "/api/v1/auth/me",
             "/api/v1/auth/menus", "/api/v1/auth/password", "/api/v1/app/public-config", "/api/v1/health"));
     private final AuditService audit;
     public PermissionInterceptor(AuditService audit) { this.audit = audit; }

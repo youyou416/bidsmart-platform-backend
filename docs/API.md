@@ -13,7 +13,8 @@
 | 方法/路径 | 认证与输入 | `data` / 行为 |
 | --- | --- | --- |
 | GET `/security/csrf` | 可匿名；限定来源与频率 | `{token,headerName}`，headerName 为 `X-CSRF-TOKEN`；绑定浏览器会话，禁止缓存 |
-| POST `/auth/login` | JSON `{username,password}` + CSRF | 当前用户 DTO；轮换会话、保存 SecurityContext，不返回 Cookie 值/密码摘要 |
+| POST `/security/captcha` | 可匿名 + CSRF；默认每来源 IP 20 次/分钟 | `{captchaId,imageDataUrl,expiresAt,expiresInSeconds}`，PNG、四位数字、默认 120 秒、会话绑定，刷新使旧图失效 |
+| POST `/auth/login` | JSON `{username,password,captchaId,captchaCode}` + CSRF | 当前用户 DTO；轮换会话、保存 SecurityContext，不返回 Cookie 值/密码摘要 |
 | POST `/auth/logout` | 当前会话 + CSRF | null；立即销毁当前服务端会话与 Cookie |
 | GET `/auth/me` | 当前会话；不接受查询其他用户的 ID | 当前用户 DTO；首次改密期间角色/权限为空、scope 为 null |
 | GET `/auth/menus` | 当前会话且已完成首次改密 | 当前用户授权的有效菜单树；不返回其他人员或全部授权配置 |
@@ -22,7 +23,7 @@
 | GET `/health` | 可匿名 | `{status:"UP"}`，最小存活状态；不代表数据库/外部服务已核验 |
 | GET `/framework/info` | 当前会话、完成首次改密、`framework:home:view` | `{description:"前后端分离基础框架"}`，用于实际基础接口权限闭环 |
 
-密码不裁剪、不自动去首尾空格，新密码必须 12～128 Unicode 字符。用户名最大128个字符。请求体上限16KiB，不允许业务文件上传。GET 不执行业务状态变更。
+密码不裁剪、不自动去首尾空格，新密码必须 12～128 Unicode 字符。用户名最大128个字符。captchaId 最长64，captchaCode 为四位 ASCII 数字（DTO 上限16）；验证码先于账号查询/密码派生校验，每次校验尝试消耗当前会话的最新挑战，失败后重新获取。答案不出现在接口中，详见 [验证码说明](CAPTCHA.md)。请求体上限16KiB，不允许业务文件上传。GET 不执行业务状态变更。
 
 ## 当前用户与菜单字段
 
@@ -36,7 +37,7 @@
 
 | HTTP | code 示例 | 客户端处理 |
 | --- | --- | --- |
-| 400 | INVALID_INPUT、PASSWORD_POLICY | 展示安全的输入/密码规则错误 |
+| 400 | INVALID_INPUT、PASSWORD_POLICY、CAPTCHA_INVALID | 展示安全的输入/密码规则错误 |
 | 401 | UNAUTHENTICATED、LOGIN_FAILED | 清理认证/动态路由/页签状态；登录失败使用统一提示 |
 | 403 | FORBIDDEN、CSRF_INVALID、FORBIDDEN_ORIGIN、PASSWORD_CHANGE_REQUIRED | 区分无权限、CSRF不符及来源拒绝；首次改密转专用页面 |
 | 404 | 前端未知页面状态 | 不自动生成不存在的页面；已定义API以本表契约为准 |
@@ -46,4 +47,4 @@
 
 浏览器写请求先握手，使用响应 headerName 放入 token；登录成功、退出或会话失效后必须重新获取。失败请求不自动重放敏感写操作。前端同时处理超时、取消、并发重复提交、401/403/429/5xx。登录回跳只接受已注册站内白名单路径，不接受绝对网址、协议相对地址或任意外部重定向。
 
-本期不提供用户/角色/部门/资源 CRUD、采购/报价/审批 API、公开文档调试入口或对外通用加解密接口。除精确白名单的8个基础端点外，新增已实现的API处理器必须标注所需权限，缺失标注默认403；`/framework/info` 已明确要求 `framework:home:view`。新增能力必须以独立编码任务明确接口、权限码、数据范围和审计；不能只增加菜单配置绕过服务端默认拒绝。
+本期不提供用户/角色/部门/资源 CRUD、采购/报价/审批 API、公开文档调试入口或对外通用加解密接口。除精确白名单的9个基础端点外，新增已实现的API处理器必须标注所需权限，缺失标注默认403；`/framework/info` 已明确要求 `framework:home:view`。新增能力必须以独立编码任务明确接口、权限码、数据范围和审计；不能只增加菜单配置绕过服务端默认拒绝。

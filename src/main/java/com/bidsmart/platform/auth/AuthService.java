@@ -2,6 +2,7 @@ package com.bidsmart.platform.auth;
 
 import com.bidsmart.platform.audit.AuditService;
 import com.bidsmart.platform.common.ApiException;
+import com.bidsmart.platform.captcha.CaptchaService;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.Optional;
@@ -17,10 +18,12 @@ public class AuthService {
     private final PasswordEncoder passwords;
     private final LoginRateLimiter limiter;
     private final AuditService audit;
+    private final CaptchaService captcha;
     private final String dummyHash;
 
-    public AuthService(UserRepository users, PasswordEncoder passwords, LoginRateLimiter limiter, AuditService audit) {
+    public AuthService(UserRepository users, PasswordEncoder passwords, LoginRateLimiter limiter, AuditService audit, CaptchaService captcha) {
         this.users = users; this.passwords = passwords; this.limiter = limiter; this.audit = audit;
+        this.captcha = captcha;
         byte[] bytes = new byte[32]; new SecureRandom().nextBytes(bytes);
         this.dummyHash = passwords.encode(Base64.getEncoder().encodeToString(bytes));
     }
@@ -30,6 +33,12 @@ public class AuthService {
         if (limiter.limited(input.getUsername(), ip)) {
             audit.record("LOGIN_RATE_LIMITED", null, "DENIED", request);
             throw new ApiException(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "登录失败次数过多，请稍后重试");
+        }
+        try { captcha.verify(input.getCaptchaId(), input.getCaptchaCode(), request); }
+        catch (ApiException error) {
+            limiter.failure(input.getUsername(), ip);
+            audit.record("LOGIN_CAPTCHA_FAILURE", null, "FAILURE", request);
+            throw error;
         }
         Optional<UserAccount> account = users.findByUsername(input.getUsername());
         // Use the stored canonical name for existing accounts so DB collation aliases cannot split a limit bucket.

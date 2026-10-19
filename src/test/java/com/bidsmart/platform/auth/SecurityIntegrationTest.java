@@ -1,6 +1,9 @@
 package com.bidsmart.platform.auth;
 
 import com.bidsmart.platform.audit.AuditEvent;
+import com.bidsmart.platform.captcha.*;
+import org.springframework.boot.test.mock.mockito.SpyBean;
+import java.util.concurrent.ConcurrentHashMap;
 import com.bidsmart.platform.audit.AuditRepository;
 import com.bidsmart.platform.crypto.Sm3PasswordEncoder;
 import com.bidsmart.platform.permission.PermissionService;
@@ -77,6 +80,10 @@ class SecurityIntegrationTest {
     @MockBean AuditRepository audit;
     @MockBean org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate unusedJdbc;
     @MockBean Clock clock;
+    @MockBean CaptchaRepository captchas;
+    @SpyBean CaptchaImageRenderer renderer;
+    private final Map<String, CaptchaRecord> challenges = new ConcurrentHashMap<>();
+    private final AtomicReference<String> renderedCode = new AtomicReference<>();
     private final AtomicReference<UserAccount> current = new AtomicReference<>();
     private static final java.util.concurrent.atomic.AtomicInteger TEST_DAY = new java.util.concurrent.atomic.AtomicInteger();
     private Instant now;
@@ -90,6 +97,18 @@ class SecurityIntegrationTest {
         now = Instant.parse("2026-10-14T00:00:00Z").plus(java.time.Duration.ofDays(TEST_DAY.incrementAndGet()));
         when(clock.instant()).thenReturn(now);
         when(clock.getZone()).thenReturn(ZoneOffset.UTC);
+        challenges.clear();
+        doAnswer(call -> { renderedCode.set(call.getArgument(0)); return call.callRealMethod(); }).when(renderer).render(anyString());
+        doAnswer(call -> {
+            CaptchaRecord record = call.getArgument(0);
+            challenges.values().removeIf(row -> row.getBinding().equals(record.getBinding()));
+            challenges.put(record.getId(), record); return null;
+        }).when(captchas).replace(any(CaptchaRecord.class));
+        when(captchas.consume(anyString(), anyString())).thenAnswer(call -> {
+            CaptchaRecord row = challenges.get(call.getArgument(0));
+            return row != null && row.getBinding().equals(call.getArgument(1)) && challenges.remove(row.getId(), row)
+                    ? Optional.of(row) : Optional.empty();
+        });
         current.set(account(true, false, 1, passwords.encode(PASSWORD)));
         when(users.findByUsername(anyString())).thenAnswer(invocation ->
                 "synthetic".equals(invocation.getArgument(0)) ? Optional.ofNullable(current.get()) : Optional.empty());
@@ -147,9 +166,10 @@ class SecurityIntegrationTest {
         Handshake handshake = handshake(null, "127.0.0.5");
         String bad = performLogin(handshake, "a bad synthetic password", "127.0.0.5")
                 .andExpect(status().isUnauthorized()).andReturn().getResponse().getContentAsString();
+        Map<String, String> unknownCaptcha = issueCaptcha(handshake, "127.0.0.6");
         MvcResult unknown = mvc.perform(post("/api/v1/auth/login").session(handshake.session)
                 .header("X-CSRF-TOKEN", handshake.token).with(request -> { request.setRemoteAddr("127.0.0.6"); return request; })
-                .contentType(MediaType.APPLICATION_JSON).content("{\"username\":\"missing\",\"password\":\"a bad synthetic password\"}"))
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of("username", "missing", "password", "a bad synthetic password", "captchaId", unknownCaptcha.get("id"), "captchaCode", unknownCaptcha.get("code")))))
                 .andExpect(status().isUnauthorized()).andReturn();
         current.set(account(false, false, 1, current.get().getPasswordHash()));
         String disabled = performLogin(handshake, PASSWORD, "127.0.0.7").andExpect(status().isUnauthorized())
@@ -315,9 +335,95 @@ class SecurityIntegrationTest {
                 json.readTree(result.getResponse().getContentAsString()).path("data").path("token").asText());
     }
     private org.springframework.test.web.servlet.ResultActions performLogin(Handshake handshake, String password, String ip) throws Exception {
+        Map<String, String> captcha = issueCaptcha(handshake, ip);
         return mvc.perform(post("/api/v1/auth/login").session(handshake.session).header("X-CSRF-TOKEN", handshake.token)
                 .header("X-Forwarded-For", "203.0.113.99").with(r -> { r.setRemoteAddr(ip); return r; })
-                .contentType(MediaType.APPLICATION_JSON).content(loginJson(password)));
+                .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of("username", "synthetic", "password", password, "captchaId", captcha.get("id"), "captchaCode", captcha.get("code")))));
+    }
+    private Map<String, String> issueCaptcha(Handshake handshake, String ip) throws Exception {
+        MvcResult response = mvc.perform(post("/api/v1/security/captcha").session(handshake.session)
+                .header("X-CSRF-TOKEN", handshake.token).with(r -> { r.setRemoteAddr(ip); return r; }))
+                .andExpect(status().isOk()).andExpect(header().string("Cache-Control", org.hamcrest.Matchers.containsString("no-store")))
+                .andExpect(jsonPath("$.data.expiresInSeconds").value(120)).andReturn();
+        JsonNode data = json.readTree(response.getResponse().getContentAsString()).path("data");
+        assertThat(data.path("imageDataUrl").asText()).startsWith("data:image/png;base64,");
+        assertThat(data.has("answer")).isFalse();
+        return Map.of("id", data.path("captchaId").asText(), "code", renderedCode.get());
+    }
+    private org.springframework.test.web.servlet.ResultActions submitCaptcha(Handshake handshake, String ip, Map<String, String> captcha, String code) throws Exception {
+        return mvc.perform(post("/api/v1/auth/login").session(handshake.session).header("X-CSRF-TOKEN", handshake.token)
+                .with(r -> { r.setRemoteAddr(ip); return r; }).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(Map.of("username", "synthetic", "password", PASSWORD,
+                        "captchaId", captcha.get("id"), "captchaCode", code))));
+    }
+
+    @Test void captchaRequiresCsrfAndCannotBeBypassedByOmission() throws Exception {
+        mvc.perform(post("/api/v1/security/captcha")).andExpect(status().isForbidden());
+        Handshake h = handshake(null, "127.0.0.30");
+        mvc.perform(post("/api/v1/auth/login").session(h.session).header("X-CSRF-TOKEN", h.token)
+                .contentType(MediaType.APPLICATION_JSON).content(loginJson(PASSWORD))).andExpect(status().isBadRequest());
+        org.mockito.Mockito.verify(users, org.mockito.Mockito.never()).findByUsername(anyString());
+    }
+    @Test void wrongCaptchaConsumesItBeforeAnyPasswordLookup(CapturedOutput logs) throws Exception {
+        Handshake h = handshake(null, "127.0.0.31");
+        Map<String, String> c = issueCaptcha(h, "127.0.0.31");
+        String wrong = c.get("code").equals("0000") ? "1111" : "0000";
+        submitCaptcha(h, "127.0.0.31", c, wrong).andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("CAPTCHA_INVALID"));
+        submitCaptcha(h, "127.0.0.31", c, c.get("code")).andExpect(status().isBadRequest());
+        org.mockito.Mockito.verify(users, org.mockito.Mockito.never()).findByUsername(anyString());
+        assertThat(challenges).isEmpty();
+        assertThat(logs.getAll()).doesNotContain("imageDataUrl", c.get("id"), PASSWORD, h.token);
+    }
+    @Test void refreshInvalidatesOldCaptchaAndExpiryIsEnforced() throws Exception {
+        Handshake h = handshake(null, "127.0.0.32");
+        Map<String, String> old = issueCaptcha(h, "127.0.0.32");
+        Map<String, String> fresh = issueCaptcha(h, "127.0.0.32");
+        assertThat(challenges).hasSize(1).containsKey(fresh.get("id"));
+        submitCaptcha(h, "127.0.0.32", old, old.get("code")).andExpect(status().isBadRequest());
+        submitCaptcha(h, "127.0.0.32", fresh, fresh.get("code")).andExpect(status().isBadRequest());
+        fresh = issueCaptcha(h, "127.0.0.32");
+        when(clock.instant()).thenReturn(now.plusSeconds(120));
+        submitCaptcha(h, "127.0.0.32", fresh, fresh.get("code")).andExpect(status().isBadRequest());
+    }
+    @Test void captchaIsSessionBoundAndSuccessfulAnswerCannotBeReplayed() throws Exception {
+        Handshake a = handshake(null, "127.0.0.33");
+        Handshake b = handshake(null, "127.0.0.34");
+        Map<String, String> c = issueCaptcha(a, "127.0.0.33");
+        submitCaptcha(b, "127.0.0.34", c, c.get("code")).andExpect(status().isBadRequest());
+        assertThat(challenges).containsKey(c.get("id"));
+        submitCaptcha(a, "127.0.0.33", c, c.get("code")).andExpect(status().isOk());
+        Handshake rotated = handshake(a.session, "127.0.0.33");
+        submitCaptcha(rotated, "127.0.0.33", c, c.get("code")).andExpect(status().isBadRequest());
+    }
+    @Test void validCaptchaWithWrongPasswordIsAlsoConsumed() throws Exception {
+        Handshake h = handshake(null, "127.0.0.37");
+        Map<String, String> c = issueCaptcha(h, "127.0.0.37");
+        mvc.perform(post("/api/v1/auth/login").session(h.session).header("X-CSRF-TOKEN", h.token)
+                .with(r -> { r.setRemoteAddr("127.0.0.37"); return r; }).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(Map.of("username", "synthetic", "password", "synthetic-wrong-password",
+                        "captchaId", c.get("id"), "captchaCode", c.get("code")))))
+                .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.code").value("LOGIN_FAILED"));
+        submitCaptcha(h, "127.0.0.37", c, c.get("code")).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("CAPTCHA_INVALID"));
+        performLogin(h, PASSWORD, "127.0.0.37").andExpect(status().isOk());
+    }
+    @Test void captchaGenerationIsPeerRateLimited() throws Exception {
+        Handshake h = handshake(null, "127.0.0.35");
+        for (int i = 0; i < 20; i++) { issueCaptcha(h, "127.0.0.35"); }
+        mvc.perform(post("/api/v1/security/captcha").session(h.session).header("X-CSRF-TOKEN", h.token)
+                .header("X-Forwarded-For", "203.0.113.10").with(r -> { r.setRemoteAddr("127.0.0.35"); return r; }))
+                .andExpect(status().isTooManyRequests());
+        when(clock.instant()).thenReturn(now.plusSeconds(60));
+        issueCaptcha(h, "127.0.0.35");
+    }
+    @Test void captchaDatabaseFailureBlocksLoginWithoutLeakingDetails(CapturedOutput logs) throws Exception {
+        Handshake h = handshake(null, "127.0.0.36");
+        Map<String, String> c = issueCaptcha(h, "127.0.0.36");
+        when(captchas.consume(anyString(), anyString())).thenThrow(new org.springframework.dao.DataAccessResourceFailureException("private-captcha-jdbc-detail"));
+        submitCaptcha(h, "127.0.0.36", c, c.get("code")).andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.code").value("DATABASE_UNAVAILABLE"));
+        org.mockito.Mockito.verify(users, org.mockito.Mockito.never()).findByUsername(anyString());
+        assertThat(logs.getAll()).doesNotContain("private-captcha-jdbc-detail");
     }
     private Handshake login(String ip) throws Exception {
         Handshake handshake = handshake(null, ip);

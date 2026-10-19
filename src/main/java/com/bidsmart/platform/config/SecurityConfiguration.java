@@ -98,7 +98,7 @@ public class SecurityConfiguration implements WebMvcConfigurer {
                             error instanceof CsrfException ? "安全令牌无效，请刷新后重试" : "没有访问权限");
                 }).and()
                 .authorizeRequests()
-                .antMatchers("/api/v1/security/csrf", "/api/v1/auth/login", "/api/v1/app/public-config", "/api/v1/health").permitAll()
+                .antMatchers("/api/v1/security/csrf", "/api/v1/security/captcha", "/api/v1/auth/login", "/api/v1/app/public-config", "/api/v1/health").permitAll()
                 .antMatchers("/api/v1/**").authenticated()
                 .anyRequest().denyAll();
         http.cors().disable();
