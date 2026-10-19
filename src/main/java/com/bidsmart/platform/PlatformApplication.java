@@ -8,6 +8,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @SpringBootApplication(exclude = UserDetailsServiceAutoConfiguration.class)
 @EnableScheduling
 public class PlatformApplication {
+
     public static void main(String[] args) {
         SpringApplication.run(PlatformApplication.class, args);
     }
